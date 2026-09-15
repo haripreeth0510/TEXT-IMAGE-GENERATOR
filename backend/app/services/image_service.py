@@ -13,17 +13,23 @@ import time
 from dataclasses import dataclass
 
 import torch
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
-from PIL import Image
+from diffusers import (
+    AutoPipelineForText2Image,
+    AutoPipelineForImage2Image,
+    AutoPipelineForInpainting,
+)
+from PIL import Image, ImageFilter
 
 MODEL_ID = "stabilityai/sdxl-turbo"
 
 # Only one generation may run on the GPU at a time — shared across
-# text2img and img2img since they use the same underlying weights.
+# text2img, img2img, and inpainting since they use the same underlying
+# weights.
 _generation_lock = asyncio.Lock()
 
 _pipe = None
 _img2img_pipe = None
+_inpaint_pipe = None
 
 
 @dataclass
@@ -84,9 +90,20 @@ def load_pipeline() -> None:
     _img2img_pipe = AutoPipelineForImage2Image.from_pipe(_pipe)
     print("[image_service] Img2img pipeline ready (shared weights).")
 
+    # Build the inpainting pipeline from the SAME loaded weights too —
+    # this is the pipeline that actually respects "only change this
+    # masked region", which plain img2img cannot do.
+    global _inpaint_pipe
+    _inpaint_pipe = AutoPipelineForInpainting.from_pipe(_pipe)
+    print("[image_service] Inpainting pipeline ready (shared weights).")
+
 
 def is_loaded() -> bool:
-    return _pipe is not None and _img2img_pipe is not None
+    return (
+        _pipe is not None
+        and _img2img_pipe is not None
+        and _inpaint_pipe is not None
+    )
 
 
 async def generate_image(
@@ -118,6 +135,72 @@ async def generate_image(
                 height=height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
+            )
+            return result.images[0]
+
+        image: Image.Image = await asyncio.to_thread(_run)
+        elapsed = time.time() - start
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return GenerationResult(
+        image_base64=encoded,
+        width=image.width,
+        height=image.height,
+        seconds_taken=round(elapsed, 2),
+    )
+
+
+async def inpaint_image(
+    image_bytes: bytes,
+    mask_bytes: bytes,
+    prompt: str,
+    num_inference_steps: int = 8,
+    guidance_scale: float = 0.0,
+    mask_blur: int = 8,
+) -> GenerationResult:
+    """
+    Runs masked inpainting: only the WHITE regions of the mask are
+    regenerated; everything under BLACK stays close to the original
+    pixels. This is the correct tool for "add/change just this one
+    thing" — plain img2img renoises the entire image and cannot
+    guarantee the rest stays untouched.
+
+    `mask_bytes` must be a PNG where white = edit this area,
+    black = keep as-is. A grayscale/RGB mask works too; it's converted
+    to a single-channel "L" mask internally.
+    """
+    if _inpaint_pipe is None:
+        raise RuntimeError(
+            "Inpainting pipeline not loaded. Call load_pipeline() at startup first."
+        )
+
+    async with _generation_lock:
+        start = time.time()
+
+        def _run():
+            source = Image.open(io.BytesIO(image_bytes))
+            source = _resize_for_model(source)
+            w, h = source.size
+
+            mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
+            mask = mask.resize((w, h))
+            # Soften mask edges so the inpainted region blends instead
+            # of showing a hard seam.
+            if mask_blur > 0:
+                mask = mask.filter(ImageFilter.GaussianBlur(mask_blur))
+
+            result = _inpaint_pipe(
+                prompt=prompt,
+                image=source,
+                mask_image=mask,
+                width=w,
+                height=h,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                strength=0.99,
             )
             return result.images[0]
 

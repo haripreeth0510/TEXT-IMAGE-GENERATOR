@@ -68,6 +68,40 @@ async def generate(req: GenerateRequest):
     )
 
 
+@app.post("/inpaint", response_model=GenerateResponse)
+async def inpaint(
+    image: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    prompt: str = Form(..., min_length=1, max_length=500),
+):
+    if not image_service.is_loaded():
+        raise HTTPException(status_code=503, detail="Model is still loading.")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
+
+    image_bytes = await image.read()
+    mask_bytes = await mask.read()
+    if not image_bytes or not mask_bytes:
+        raise HTTPException(status_code=400, detail="Image or mask is empty.")
+
+    try:
+        result = await image_service.inpaint_image(
+            image_bytes=image_bytes,
+            mask_bytes=mask_bytes,
+            prompt=prompt,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return GenerateResponse(
+        image_base64=result.image_base64,
+        width=result.width,
+        height=result.height,
+        seconds_taken=result.seconds_taken,
+    )
+
+
 @app.post("/edit", response_model=GenerateResponse)
 async def edit(
     image: UploadFile = File(...),
