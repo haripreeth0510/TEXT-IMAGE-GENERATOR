@@ -13,15 +13,17 @@ import time
 from dataclasses import dataclass
 
 import torch
-from diffusers import AutoPipelineForText2Image
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
 from PIL import Image
 
 MODEL_ID = "stabilityai/sdxl-turbo"
 
-# Only one generation may run on the GPU at a time.
+# Only one generation may run on the GPU at a time — shared across
+# text2img and img2img since they use the same underlying weights.
 _generation_lock = asyncio.Lock()
 
 _pipe = None
+_img2img_pipe = None
 
 
 @dataclass
@@ -73,11 +75,18 @@ def load_pipeline() -> None:
         pass
 
     _pipe = pipe
-    print("[image_service] Pipeline loaded and ready.")
+    print("[image_service] Text2img pipeline loaded and ready.")
+
+    # Build the img2img pipeline from the SAME loaded weights via
+    # from_pipe — this shares the UNet/VAE/text encoders in memory
+    # instead of loading a second copy, which matters a lot at 16GB.
+    global _img2img_pipe
+    _img2img_pipe = AutoPipelineForImage2Image.from_pipe(_pipe)
+    print("[image_service] Img2img pipeline ready (shared weights).")
 
 
 def is_loaded() -> bool:
-    return _pipe is not None
+    return _pipe is not None and _img2img_pipe is not None
 
 
 async def generate_image(
@@ -107,6 +116,72 @@ async def generate_image(
                 prompt=prompt,
                 width=width,
                 height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+            )
+            return result.images[0]
+
+        image: Image.Image = await asyncio.to_thread(_run)
+        elapsed = time.time() - start
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return GenerationResult(
+        image_base64=encoded,
+        width=image.width,
+        height=image.height,
+        seconds_taken=round(elapsed, 2),
+    )
+
+
+def _resize_for_model(image: Image.Image, max_dim: int = 768) -> Image.Image:
+    """
+    Downscales large uploads before feeding them to the model — running
+    img2img on a huge uploaded photo will blow past 16GB fast. SDXL
+    Turbo also expects dimensions divisible by 8.
+    """
+    image = image.convert("RGB")
+    w, h = image.size
+    scale = min(max_dim / max(w, h), 1.0)
+    new_w = int(w * scale) // 8 * 8
+    new_h = int(h * scale) // 8 * 8
+    return image.resize((max(new_w, 8), max(new_h, 8)))
+
+
+async def edit_image(
+    image_bytes: bytes,
+    prompt: str,
+    strength: float = 0.6,
+    num_inference_steps: int = 4,
+    guidance_scale: float = 0.0,
+) -> GenerationResult:
+    """
+    Runs image-to-image editing: takes an uploaded image + a text
+    instruction and returns a modified image.
+
+    `strength` controls how much the output is allowed to deviate from
+    the input — 0.0 leaves it unchanged, 1.0 is close to a fresh
+    generation. 0.5-0.7 is a reasonable range for "edit this image"
+    rather than "make something new".
+    """
+    if _img2img_pipe is None:
+        raise RuntimeError(
+            "Img2img pipeline not loaded. Call load_pipeline() at startup first."
+        )
+
+    async with _generation_lock:
+        start = time.time()
+
+        def _run():
+            source = Image.open(io.BytesIO(image_bytes))
+            source = _resize_for_model(source)
+
+            result = _img2img_pipe(
+                prompt=prompt,
+                image=source,
+                strength=strength,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
             )
