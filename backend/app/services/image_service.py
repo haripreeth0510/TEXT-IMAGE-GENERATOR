@@ -21,6 +21,7 @@ from diffusers import (
 from PIL import Image, ImageFilter
 
 MODEL_ID = "stabilityai/sdxl-turbo"
+INPAINT_MODEL_ID = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
 
 # Only one generation may run on the GPU at a time — shared across
 # text2img, img2img, and inpainting since they use the same underlying
@@ -90,20 +91,62 @@ def load_pipeline() -> None:
     _img2img_pipe = AutoPipelineForImage2Image.from_pipe(_pipe)
     print("[image_service] Img2img pipeline ready (shared weights).")
 
-    # Build the inpainting pipeline from the SAME loaded weights too —
-    # this is the pipeline that actually respects "only change this
-    # masked region", which plain img2img cannot do.
+    # NOTE: the inpainting pipeline is intentionally NOT loaded here.
+    # It uses a separate, higher-quality checkpoint (not Turbo) for
+    # realistic results, which costs significant extra memory — so it's
+    # loaded lazily on first use via load_inpaint_pipeline(), rather
+    # than adding that cost to every startup regardless of whether
+    # inpainting is even used this session.
+
+
+def load_inpaint_pipeline() -> None:
+    """
+    Loads a DEDICATED SDXL inpainting checkpoint — not Turbo — because
+    Turbo's speed distillation caps achievable detail/realism no matter
+    how the pipeline is tuned. This uses real step counts and real
+    classifier-free guidance for actually realistic results.
+
+    This is a separate ~7GB download from SDXL Turbo and a separate set
+    of weights in memory (not shared via from_pipe), so it's called
+    lazily on first inpaint request rather than at startup — keep this
+    in mind on 16GB machines: running this alongside the Turbo
+    pipelines is more memory pressure than Phase 1/2 had.
+    """
     global _inpaint_pipe
-    _inpaint_pipe = AutoPipelineForInpainting.from_pipe(_pipe)
-    print("[image_service] Inpainting pipeline ready (shared weights).")
+
+    if _inpaint_pipe is not None:
+        return
+
+    device = _get_device()
+    print(f"[image_service] Loading {INPAINT_MODEL_ID} on device={device} "
+          f"(first call — this downloads ~7GB and may take a while) ...")
+
+    dtype = torch.float16 if device in ("mps", "cuda") else torch.float32
+
+    pipe = AutoPipelineForInpainting.from_pretrained(
+        INPAINT_MODEL_ID,
+        torch_dtype=dtype,
+        variant="fp16" if device in ("mps", "cuda") else None,
+    )
+    pipe = pipe.to(device)
+
+    pipe.enable_attention_slicing()
+    try:
+        pipe.enable_vae_slicing()
+        pipe.enable_vae_tiling()
+    except AttributeError:
+        pass
+
+    _inpaint_pipe = pipe
+    print("[image_service] Quality inpainting pipeline loaded and ready.")
 
 
 def is_loaded() -> bool:
-    return (
-        _pipe is not None
-        and _img2img_pipe is not None
-        and _inpaint_pipe is not None
-    )
+    return _pipe is not None and _img2img_pipe is not None
+
+
+def is_inpaint_loaded() -> bool:
+    return _inpaint_pipe is not None
 
 
 async def generate_image(
@@ -157,16 +200,20 @@ async def inpaint_image(
     image_bytes: bytes,
     mask_bytes: bytes,
     prompt: str,
-    num_inference_steps: int = 8,
-    guidance_scale: float = 0.0,
+    num_inference_steps: int = 30,
+    guidance_scale: float = 8.0,
     mask_blur: int = 8,
+    negative_prompt: str = "blurry, low quality, distorted, deformed, bad anatomy, artifacts",
 ) -> GenerationResult:
     """
-    Runs masked inpainting: only the WHITE regions of the mask are
-    regenerated; everything under BLACK stays close to the original
-    pixels. This is the correct tool for "add/change just this one
-    thing" — plain img2img renoises the entire image and cannot
-    guarantee the rest stays untouched.
+    Runs masked inpainting using a DEDICATED inpainting checkpoint with
+    real diffusion steps and real classifier-free guidance — this is
+    what actually produces realistic detail, unlike Turbo's 1-4 step
+    distilled shortcuts. Expect ~1-2 minutes per edit on a 16GB Mac in
+    exchange for meaningfully better quality.
+
+    Only the WHITE regions of the mask are regenerated; everything
+    under BLACK stays close to the original pixels.
 
     `mask_bytes` must be a PNG where white = edit this area,
     black = keep as-is. A grayscale/RGB mask works too; it's converted
@@ -174,7 +221,7 @@ async def inpaint_image(
     """
     if _inpaint_pipe is None:
         raise RuntimeError(
-            "Inpainting pipeline not loaded. Call load_pipeline() at startup first."
+            "Inpainting pipeline not loaded. Call load_inpaint_pipeline() first."
         )
 
     async with _generation_lock:
@@ -194,6 +241,7 @@ async def inpaint_image(
 
             result = _inpaint_pipe(
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 image=source,
                 mask_image=mask,
                 width=w,

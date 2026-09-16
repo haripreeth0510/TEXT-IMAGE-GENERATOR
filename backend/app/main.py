@@ -43,6 +43,7 @@ async def health():
     return {
         "status": "ok",
         "model_loaded": image_service.is_loaded(),
+        "inpaint_model_loaded": image_service.is_inpaint_loaded(),
     }
 
 
@@ -74,8 +75,17 @@ async def inpaint(
     mask: UploadFile = File(...),
     prompt: str = Form(..., min_length=1, max_length=500),
 ):
-    if not image_service.is_loaded():
-        raise HTTPException(status_code=503, detail="Model is still loading.")
+    # The quality inpainting model loads lazily on first use (separate,
+    # heavier checkpoint than Turbo) — first request after server start
+    # will be slow due to download + load, not just generation.
+    if not image_service.is_inpaint_loaded():
+        try:
+            image_service.load_inpaint_pipeline()
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to load inpainting model: {e}",
+            )
 
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
