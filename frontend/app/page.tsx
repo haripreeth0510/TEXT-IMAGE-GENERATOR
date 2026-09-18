@@ -318,6 +318,39 @@ export default function Home() {
     }
   }
 
+  async function deleteHistoryItem(id: string) {
+    const previous = history;
+    setHistory((h) => h.filter((item) => item.id !== id)); // optimistic
+    try {
+      const res = await fetch(`${API_URL}/history/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Could not delete that item.");
+    } catch (err) {
+      setHistory(previous); // revert on failure
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    }
+  }
+
+  async function deleteAllHistory() {
+    if (
+      !window.confirm(
+        "Delete your entire generation history? This can't be undone."
+      )
+    ) {
+      return;
+    }
+    const previous = history;
+    setHistory([]); // optimistic
+    try {
+      const res = await fetch(`${API_URL}/history`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Could not delete history.");
+    } catch (err) {
+      setHistory(previous); // revert on failure
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    }
+  }
+
   function switchMode(next: Mode) {
     setMode(next);
     resetResult();
@@ -574,6 +607,16 @@ export default function Home() {
 
       {mode === "history" && (
         <div className="w-full max-w-xl">
+          {history.length > 0 && (
+            <div className="flex justify-end mb-3">
+              <button
+                onClick={deleteAllHistory}
+                className="text-red-400 hover:text-red-300 text-sm underline"
+              >
+                Delete all
+              </button>
+            </div>
+          )}
           {historyLoading && (
             <p className="text-neutral-500 text-sm">Loading history...</p>
           )}
@@ -586,8 +629,15 @@ export default function Home() {
             {history.map((item) => (
               <div
                 key={item.id}
-                className="rounded-lg border border-neutral-800 overflow-hidden"
+                className="rounded-lg border border-neutral-800 overflow-hidden relative group"
               >
+                <button
+                  onClick={() => deleteHistoryItem(item.id)}
+                  title="Delete this generation"
+                  className="absolute top-2 right-2 w-7 h-7 rounded-full bg-neutral-950/80 text-neutral-300 hover:text-red-400 hover:bg-neutral-950 flex items-center justify-center text-sm leading-none z-10"
+                >
+                  ×
+                </button>
                 <img
                   src={`${API_URL}${item.image_url}`}
                   alt={item.prompt}

@@ -94,6 +94,37 @@ async def history(db: Session = Depends(get_db)):
     ]
 
 
+@app.delete("/history/{generation_id}")
+async def delete_history_item(generation_id: str, db: Session = Depends(get_db)):
+    record = db.query(Generation).filter(Generation.id == generation_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Generation not found.")
+
+    file_path = STORAGE_DIR / record.image_path
+    if file_path.exists():
+        file_path.unlink()
+
+    db.delete(record)
+    db.commit()
+
+    return {"status": "deleted", "id": generation_id}
+
+
+@app.delete("/history")
+async def delete_all_history(db: Session = Depends(get_db)):
+    records = db.query(Generation).all()
+
+    for record in records:
+        file_path = STORAGE_DIR / record.image_path
+        if file_path.exists():
+            file_path.unlink()
+        db.delete(record)
+
+    db.commit()
+
+    return {"status": "deleted", "count": len(records)}
+
+
 # ---------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------
