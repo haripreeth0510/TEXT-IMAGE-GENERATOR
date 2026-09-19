@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 const API_URL = "http://localhost:8000";
 
-type Mode = "generate" | "repaint" | "inpaint" | "history";
+type Mode = "generate" | "inpaint" | "history";
 
 type HistoryItem = {
   id: string;
@@ -30,9 +30,9 @@ export default function Home() {
   const [seconds, setSeconds] = useState<number | null>(null);
 
   // The current "working" image for the conversation — whatever the
-  // last successful generate/repaint/inpaint produced. Repaint and
-  // Paint & Edit can both continue from this instead of requiring a
-  // fresh upload, which is what makes edits feel conversational.
+  // last successful generate/inpaint produced. Paint & Edit can
+  // continue from this instead of requiring a fresh upload, which is
+  // what makes edits feel conversational.
   const [currentImage, setCurrentImage] = useState<string | null>(null);
   // Stack of previous currentImage values, most recent last — Undo
   // pops from here. This only affects what's shown/continued from on
@@ -40,12 +40,6 @@ export default function Home() {
   const [undoStack, setUndoStack] = useState<string[]>([]);
 
   const [prompt, setPrompt] = useState("");
-
-  const [repaintPrompt, setRepaintPrompt] = useState("");
-  const [strength, setStrength] = useState(0.6);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadPreview, setUploadPreview] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [inpaintPrompt, setInpaintPrompt] = useState("");
   const [inpaintFile, setInpaintFile] = useState<File | null>(null);
@@ -67,7 +61,7 @@ export default function Home() {
     setSeconds(null);
   }
 
-  // Call this after any successful generate/repaint/inpaint — advances
+  // Call this after any successful generate/inpaint — advances
   // the working image and records what it replaced so Undo can go back.
   function advanceSession(newImageUrl: string) {
     setUndoStack((stack) =>
@@ -96,54 +90,6 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, width: 768, height: 768 }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-      const url = `${API_URL}${data.image_url}`;
-      setImageSrc(url);
-      setSeconds(data.seconds_taken);
-      advanceSession(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // ---------- Repaint ----------
-  function handleRepaintFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadFile(file);
-    resetResult();
-    const reader = new FileReader();
-    reader.onload = () => setUploadPreview(reader.result as string);
-    reader.readAsDataURL(file);
-  }
-
-  async function useCurrentForRepaint() {
-    if (!currentImage) return;
-    resetResult();
-    const file = await urlToFile(currentImage, "current.png");
-    setUploadFile(file);
-    setUploadPreview(currentImage);
-  }
-
-  async function handleRepaint() {
-    if (!uploadFile || !repaintPrompt.trim()) return;
-    setLoading(true);
-    resetResult();
-    try {
-      const formData = new FormData();
-      formData.append("image", uploadFile);
-      formData.append("prompt", repaintPrompt);
-      formData.append("strength", String(strength));
-      const res = await fetch(`${API_URL}/edit`, {
-        method: "POST",
-        body: formData,
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -264,6 +210,23 @@ export default function Home() {
     setHasMaskStrokes(false);
   }
 
+  function invertMask() {
+    const canvas = maskCanvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!ctx || !canvas) return;
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const px = imageData.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const inverted = 255 - px[i]; // mask is grayscale strokes on black
+      px[i] = inverted;
+      px[i + 1] = inverted;
+      px[i + 2] = inverted;
+      px[i + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    setHasMaskStrokes(true);
+  }
+
   async function handleInpaint() {
     if (!inpaintFile || !inpaintPrompt.trim() || !hasMaskStrokes) return;
     const maskCanvas = maskCanvasRef.current;
@@ -359,7 +322,6 @@ export default function Home() {
 
   const tabs: { key: Mode; label: string }[] = [
     { key: "generate", label: "Generate" },
-    { key: "repaint", label: "Repaint" },
     { key: "inpaint", label: "Paint & Edit" },
     { key: "history", label: "History" },
   ];
@@ -368,8 +330,8 @@ export default function Home() {
     <main className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center px-4 py-16">
       <h1 className="text-2xl font-semibold mb-2">Nano Banana</h1>
       <p className="text-neutral-500 text-sm mb-6">
-        Phase 4 — generate, repaint, precisely edit, continue the
-        conversation, and undo
+        Phase 4 — generate, precisely edit, continue the conversation, and
+        undo
       </p>
 
       {/* Session bar: shows the working image and lets you undo */}
@@ -381,8 +343,8 @@ export default function Home() {
             className="w-10 h-10 rounded object-cover"
           />
           <span className="text-neutral-400 text-xs flex-1">
-            Working image — use &quot;Continue from this&quot; in Repaint or
-            Paint &amp; Edit to keep editing it
+            Working image — use &quot;Continue from this&quot; in Paint &amp;
+            Edit to keep editing it
           </span>
           <button
             onClick={handleUndo}
@@ -429,79 +391,16 @@ export default function Home() {
         </div>
       )}
 
-      {mode === "repaint" && (
-        <div className="w-full max-w-xl flex flex-col gap-4">
-          <div
-            onClick={() => fileInputRef.current?.click()}
-            className="cursor-pointer rounded-lg border-2 border-dashed border-neutral-700 hover:border-neutral-500 transition flex flex-col items-center justify-center py-8 px-4 text-center"
-          >
-            {uploadPreview ? (
-              <img
-                src={uploadPreview}
-                alt="Upload preview"
-                className="max-h-56 rounded-md"
-              />
-            ) : (
-              <p className="text-neutral-300 font-medium">
-                Click to upload an image
-              </p>
-            )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png, image/jpeg"
-              onChange={handleRepaintFileChange}
-              className="hidden"
-            />
-          </div>
-
-          {currentImage && (
-            <button
-              onClick={useCurrentForRepaint}
-              className="text-yellow-400 hover:text-yellow-300 text-sm underline self-start"
-            >
-              Continue from this — use working image instead
-            </button>
-          )}
-
-          <div className="flex gap-2">
-            <input
-              className="flex-1 rounded-md bg-neutral-900 border border-neutral-700 px-4 py-2 outline-none focus:border-neutral-400"
-              placeholder="Describe the new style, or what to change next..."
-              value={repaintPrompt}
-              onChange={(e) => setRepaintPrompt(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleRepaint()}
-            />
-            <button
-              onClick={handleRepaint}
-              disabled={loading || !uploadFile || !repaintPrompt.trim()}
-              className="rounded-md bg-yellow-400 text-neutral-900 font-medium px-5 py-2 disabled:opacity-50 whitespace-nowrap"
-            >
-              {loading ? "Working..." : "Repaint"}
-            </button>
-          </div>
-
-          <div className="flex items-center gap-3 text-sm text-neutral-400">
-            <span>Subtle</span>
-            <input
-              type="range"
-              min={0.2}
-              max={0.9}
-              step={0.05}
-              value={strength}
-              onChange={(e) => setStrength(parseFloat(e.target.value))}
-              className="flex-1"
-            />
-            <span>Strong</span>
-            <span className="w-10 text-right text-neutral-300">
-              {strength.toFixed(2)}
-            </span>
-          </div>
-        </div>
-      )}
-
       {mode === "inpaint" && (
         <div className="w-full max-w-xl flex flex-col gap-4">
+          <p className="text-neutral-500 text-xs -mt-2">
+            To change a background: paint roughly around the subject (don't
+            worry about being precise), click <strong>Invert mask</strong>
+            so everything except the subject becomes the edit area, then
+            describe the new background. This keeps the person untouched
+            while the background gets fully regenerated.
+          </p>
+
           {!inpaintPreview && (
             <>
               <div
@@ -569,6 +468,13 @@ export default function Home() {
                   className="text-neutral-400 hover:text-neutral-200 underline whitespace-nowrap"
                 >
                   Clear mask
+                </button>
+                <button
+                  onClick={invertMask}
+                  title="Swap painted area with unpainted area — paint around the subject, then invert to edit the background instead"
+                  className="text-neutral-400 hover:text-neutral-200 underline whitespace-nowrap"
+                >
+                  Invert mask
                 </button>
                 <button
                   onClick={() => {
