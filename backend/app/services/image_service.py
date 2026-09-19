@@ -15,22 +15,23 @@ from dataclasses import dataclass
 import torch
 from diffusers import (
     AutoPipelineForText2Image,
-    AutoPipelineForImage2Image,
     AutoPipelineForInpainting,
 )
 from PIL import Image, ImageFilter
 
 MODEL_ID = "stabilityai/sdxl-turbo"
 INPAINT_MODEL_ID = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+IP_ADAPTER_REPO = "h94/IP-Adapter"
+IP_ADAPTER_WEIGHT = "ip-adapter_sdxl.bin"
 
 # Only one generation may run on the GPU at a time — shared across
-# text2img, img2img, and inpainting since they use the same underlying
-# weights.
+# text2img, inpainting, and reference-conditioned generation since they
+# use the same underlying weights.
 _generation_lock = asyncio.Lock()
 
 _pipe = None
-_img2img_pipe = None
 _inpaint_pipe = None
+_ref_pipe = None
 
 
 @dataclass
@@ -84,13 +85,6 @@ def load_pipeline() -> None:
     _pipe = pipe
     print("[image_service] Text2img pipeline loaded and ready.")
 
-    # Build the img2img pipeline from the SAME loaded weights via
-    # from_pipe — this shares the UNet/VAE/text encoders in memory
-    # instead of loading a second copy, which matters a lot at 16GB.
-    global _img2img_pipe
-    _img2img_pipe = AutoPipelineForImage2Image.from_pipe(_pipe)
-    print("[image_service] Img2img pipeline ready (shared weights).")
-
     # NOTE: the inpainting pipeline is intentionally NOT loaded here.
     # It uses a separate, higher-quality checkpoint (not Turbo) for
     # realistic results, which costs significant extra memory — so it's
@@ -142,11 +136,44 @@ def load_inpaint_pipeline() -> None:
 
 
 def is_loaded() -> bool:
-    return _pipe is not None and _img2img_pipe is not None
+    return _pipe is not None
 
 
 def is_inpaint_loaded() -> bool:
     return _inpaint_pipe is not None
+
+
+def is_reference_loaded() -> bool:
+    return _ref_pipe is not None
+
+
+def load_reference_pipeline() -> None:
+    """
+    Loads an IP-Adapter on TOP of the already-loaded Turbo weights
+    (shared, not duplicated, via from_pipe) so text2img can also accept
+    a reference image for style/character conditioning. Lazy-loaded on
+    first use of the reference-image feature — adds a modest extra
+    download (image encoder + adapter weights, a few hundred MB), not a
+    whole second model.
+    """
+    global _ref_pipe
+
+    if _ref_pipe is not None:
+        return
+    if _pipe is None:
+        raise RuntimeError("Base pipeline not loaded. Call load_pipeline() first.")
+
+    print(f"[image_service] Loading IP-Adapter ({IP_ADAPTER_REPO}) for "
+          f"reference-image conditioning (first call — downloads weights) ...")
+
+    ref_pipe = AutoPipelineForText2Image.from_pipe(_pipe)
+    ref_pipe.load_ip_adapter(
+        IP_ADAPTER_REPO,
+        subfolder="sdxl_models",
+        weight_name=IP_ADAPTER_WEIGHT,
+    )
+    _ref_pipe = ref_pipe
+    print("[image_service] Reference-image pipeline ready.")
 
 
 async def generate_image(
@@ -270,8 +297,8 @@ async def inpaint_image(
 def _resize_for_model(image: Image.Image, max_dim: int = 768) -> Image.Image:
     """
     Downscales large uploads before feeding them to the model — running
-    img2img on a huge uploaded photo will blow past 16GB fast. SDXL
-    Turbo also expects dimensions divisible by 8.
+    inpainting on a huge uploaded photo will blow past 16GB fast. SDXL
+    also expects dimensions divisible by 8.
     """
     image = image.convert("RGB")
     w, h = image.size
@@ -281,38 +308,38 @@ def _resize_for_model(image: Image.Image, max_dim: int = 768) -> Image.Image:
     return image.resize((max(new_w, 8), max(new_h, 8)))
 
 
-async def edit_image(
-    image_bytes: bytes,
+async def generate_with_reference(
     prompt: str,
-    strength: float = 0.6,
-    num_inference_steps: int = 4,
+    reference_image_bytes: bytes,
+    reference_strength: float = 0.6,
+    width: int = 768,
+    height: int = 768,
+    num_inference_steps: int = 2,
     guidance_scale: float = 0.0,
 ) -> GenerationResult:
     """
-    Runs image-to-image editing: takes an uploaded image + a text
-    instruction and returns a modified image.
-
-    `strength` controls how much the output is allowed to deviate from
-    the input — 0.0 leaves it unchanged, 1.0 is close to a fresh
-    generation. 0.5-0.7 is a reasonable range for "edit this image"
-    rather than "make something new".
+    Text-to-image generation conditioned on a reference image (style or
+    character likeness) via IP-Adapter, on top of the text prompt.
+    `reference_strength` (0.0-1.0) controls how strongly the reference
+    image influences the result — low values lean on the prompt more,
+    high values copy the reference's style/content more aggressively.
     """
-    if _img2img_pipe is None:
+    if _ref_pipe is None:
         raise RuntimeError(
-            "Img2img pipeline not loaded. Call load_pipeline() at startup first."
+            "Reference pipeline not loaded. Call load_reference_pipeline() first."
         )
 
     async with _generation_lock:
         start = time.time()
 
         def _run():
-            source = Image.open(io.BytesIO(image_bytes))
-            source = _resize_for_model(source)
-
-            result = _img2img_pipe(
+            ref_image = Image.open(io.BytesIO(reference_image_bytes)).convert("RGB")
+            _ref_pipe.set_ip_adapter_scale(reference_strength)
+            result = _ref_pipe(
                 prompt=prompt,
-                image=source,
-                strength=strength,
+                ip_adapter_image=ref_image,
+                width=width,
+                height=height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
             )
@@ -320,6 +347,37 @@ async def edit_image(
 
         image: Image.Image = await asyncio.to_thread(_run)
         elapsed = time.time() - start
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return GenerationResult(
+        image_base64=encoded,
+        width=image.width,
+        height=image.height,
+        seconds_taken=round(elapsed, 2),
+    )
+
+
+async def upscale_image(image_bytes: bytes, factor: int = 2) -> GenerationResult:
+    """
+    Simple Lanczos upscale — NOT AI super-resolution. This resizes with
+    a high-quality resampling filter, which sharpens edges reasonably
+    but does not invent new detail the way a model like Real-ESRGAN
+    would. It's fast (CPU-only, no GPU/model involved) and fine for
+    "make this bigger for printing/sharing"; if you want actual
+    AI-upscaled detail later, that's a separate model to add.
+    """
+    start = time.time()
+
+    def _run():
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        new_size = (image.width * factor, image.height * factor)
+        return image.resize(new_size, Image.LANCZOS)
+
+    image: Image.Image = await asyncio.to_thread(_run)
+    elapsed = time.time() - start
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")

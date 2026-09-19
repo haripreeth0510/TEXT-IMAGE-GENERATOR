@@ -136,6 +136,7 @@ async def health():
         "status": "ok",
         "model_loaded": image_service.is_loaded(),
         "inpaint_model_loaded": image_service.is_inpaint_loaded(),
+        "reference_model_loaded": image_service.is_reference_loaded(),
     }
 
 
@@ -228,16 +229,60 @@ async def inpaint(
     )
 
 
-@app.post("/edit", response_model=GenerateResponse)
-async def edit(
-    image: UploadFile = File(...),
+@app.post("/generate/reference", response_model=GenerateResponse)
+async def generate_with_reference(
+    reference: UploadFile = File(...),
     prompt: str = Form(..., min_length=1, max_length=500),
-    strength: float = Form(default=0.6, ge=0.1, le=1.0),
+    reference_strength: float = Form(default=0.6, ge=0.0, le=1.0),
+    width: int = Form(default=768, ge=256, le=1024),
+    height: int = Form(default=768, ge=256, le=1024),
     db: Session = Depends(get_db),
 ):
-    if not image_service.is_loaded():
-        raise HTTPException(status_code=503, detail="Model is still loading.")
+    if not image_service.is_reference_loaded():
+        try:
+            image_service.load_reference_pipeline()
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to load reference-image model: {e}",
+            )
 
+    if not reference.content_type or not reference.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Reference file must be an image.")
+
+    reference_bytes = await reference.read()
+    if not reference_bytes:
+        raise HTTPException(status_code=400, detail="Reference image is empty.")
+
+    try:
+        result = await image_service.generate_with_reference(
+            prompt=prompt,
+            reference_image_bytes=reference_bytes,
+            reference_strength=reference_strength,
+            width=width,
+            height=height,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    image_url = _save_generation(
+        db, "generate", f"{prompt} (ref image)", result.image_base64, result.seconds_taken,
+    )
+
+    return GenerateResponse(
+        image_url=image_url,
+        width=result.width,
+        height=result.height,
+        seconds_taken=result.seconds_taken,
+    )
+
+
+@app.post("/upscale", response_model=GenerateResponse)
+async def upscale(
+    image: UploadFile = File(...),
+    factor: int = Form(default=2, ge=2, le=4),
+    db: Session = Depends(get_db),
+):
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
 
@@ -246,16 +291,12 @@ async def edit(
         raise HTTPException(status_code=400, detail="Uploaded image is empty.")
 
     try:
-        result = await image_service.edit_image(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            strength=strength,
-        )
+        result = await image_service.upscale_image(image_bytes, factor=factor)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     image_url = _save_generation(
-        db, "repaint", prompt, result.image_base64, result.seconds_taken,
+        db, "upscale", f"{factor}x upscale", result.image_base64, result.seconds_taken,
     )
 
     return GenerateResponse(

@@ -40,6 +40,14 @@ export default function Home() {
   const [undoStack, setUndoStack] = useState<string[]>([]);
 
   const [prompt, setPrompt] = useState("");
+  const [resolution, setResolution] = useState(768);
+  const [useReference, setUseReference] = useState(false);
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
+  const [referencePreview, setReferencePreview] = useState<string | null>(
+    null
+  );
+  const [referenceStrength, setReferenceStrength] = useState(0.6);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
 
   const [inpaintPrompt, setInpaintPrompt] = useState("");
   const [inpaintFile, setInpaintFile] = useState<File | null>(null);
@@ -81,15 +89,87 @@ export default function Home() {
   }
 
   // ---------- Generate ----------
+  function handleReferenceFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setReferenceFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setReferencePreview(reader.result as string);
+    reader.readAsDataURL(file);
+  }
+
   async function handleGenerate() {
     if (!prompt.trim()) return;
+    if (useReference && !referenceFile) return;
     setLoading(true);
     resetResult();
     try {
-      const res = await fetch(`${API_URL}/generate`, {
+      let res: Response;
+      if (useReference && referenceFile) {
+        const formData = new FormData();
+        formData.append("reference", referenceFile);
+        formData.append("prompt", prompt);
+        formData.append("reference_strength", String(referenceStrength));
+        formData.append("width", String(resolution));
+        formData.append("height", String(resolution));
+        res = await fetch(`${API_URL}/generate/reference`, {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        res = await fetch(`${API_URL}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            width: resolution,
+            height: resolution,
+          }),
+        });
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${res.status})`);
+      }
+      const data = await res.json();
+      const url = `${API_URL}${data.image_url}`;
+      setImageSrc(url);
+      setSeconds(data.seconds_taken);
+      advanceSession(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ---------- Download / Upscale (shared result actions) ----------
+  async function handleDownload() {
+    if (!imageSrc) return;
+    const res = await fetch(imageSrc);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = `nano-banana-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  async function handleUpscale() {
+    if (!imageSrc) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const file = await urlToFile(imageSrc, "upscale-source.png");
+      const formData = new FormData();
+      formData.append("image", file);
+      formData.append("factor", "2");
+      const res = await fetch(`${API_URL}/upscale`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, width: 768, height: 768 }),
+        body: formData,
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -373,21 +453,106 @@ export default function Home() {
       </div>
 
       {mode === "generate" && (
-        <div className="w-full max-w-xl flex gap-2">
-          <input
-            className="flex-1 rounded-md bg-neutral-900 border border-neutral-700 px-4 py-2 outline-none focus:border-neutral-400"
-            placeholder="Describe the image you want..."
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
-          />
-          <button
-            onClick={handleGenerate}
-            disabled={loading || !prompt.trim()}
-            className="rounded-md bg-yellow-400 text-neutral-900 font-medium px-5 py-2 disabled:opacity-50"
-          >
-            {loading ? "Generating..." : "Generate"}
-          </button>
+        <div className="w-full max-w-xl flex flex-col gap-4">
+          <div className="flex gap-2">
+            <input
+              className="flex-1 rounded-md bg-neutral-900 border border-neutral-700 px-4 py-2 outline-none focus:border-neutral-400"
+              placeholder="Describe the image you want..."
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
+            />
+            <select
+              value={resolution}
+              onChange={(e) => setResolution(parseInt(e.target.value))}
+              className="rounded-md bg-neutral-900 border border-neutral-700 px-2 text-sm text-neutral-300 outline-none"
+            >
+              <option value={512}>512px</option>
+              <option value={768}>768px</option>
+              <option value={1024}>1024px</option>
+            </select>
+            <button
+              onClick={handleGenerate}
+              disabled={
+                loading || !prompt.trim() || (useReference && !referenceFile)
+              }
+              className="rounded-md bg-yellow-400 text-neutral-900 font-medium px-5 py-2 disabled:opacity-50 whitespace-nowrap"
+            >
+              {loading ? "Generating..." : "Generate"}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              id="use-reference"
+              type="checkbox"
+              checked={useReference}
+              onChange={(e) => {
+                setUseReference(e.target.checked);
+                if (!e.target.checked) {
+                  setReferenceFile(null);
+                  setReferencePreview(null);
+                }
+              }}
+              className="accent-yellow-400"
+            />
+            <label
+              htmlFor="use-reference"
+              className="text-neutral-400 text-sm cursor-pointer"
+            >
+              Use a reference image (style / character likeness)
+            </label>
+          </div>
+
+          {useReference && (
+            <div className="flex flex-col gap-3">
+              <div
+                onClick={() => referenceInputRef.current?.click()}
+                className="cursor-pointer rounded-lg border-2 border-dashed border-neutral-700 hover:border-neutral-500 transition flex flex-col items-center justify-center py-6 px-4 text-center"
+              >
+                {referencePreview ? (
+                  <img
+                    src={referencePreview}
+                    alt="Reference preview"
+                    className="max-h-40 rounded-md"
+                  />
+                ) : (
+                  <p className="text-neutral-300 text-sm font-medium">
+                    Click to upload a reference image
+                  </p>
+                )}
+                <input
+                  ref={referenceInputRef}
+                  type="file"
+                  accept="image/png, image/jpeg"
+                  onChange={handleReferenceFileChange}
+                  className="hidden"
+                />
+              </div>
+              <div className="flex items-center gap-3 text-sm text-neutral-400">
+                <span>Loose</span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={referenceStrength}
+                  onChange={(e) =>
+                    setReferenceStrength(parseFloat(e.target.value))
+                  }
+                  className="flex-1"
+                />
+                <span>Strict</span>
+                <span className="w-10 text-right text-neutral-300">
+                  {referenceStrength.toFixed(2)}
+                </span>
+              </div>
+              <p className="text-neutral-600 text-xs">
+                Higher strength copies the reference's style/content more
+                aggressively; lower lets your text prompt lead.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -449,8 +614,7 @@ export default function Home() {
                 />
               </div>
 
-              <div className="flex items-center gap-3 text-sm text-neutral-400">
-                <span>Brush</span>
+              <div className="flex items-center gap-3 text-sm text-neutral-400 flex-wrap">
                 <input
                   type="range"
                   min={10}
@@ -563,18 +727,39 @@ export default function Home() {
         </div>
       )}
 
-      {error && <p className="mt-4 text-red-400 text-sm max-w-xl">{error}</p>}
+      {error && (
+        <p className="mt-4 text-red-400 text-sm max-w-xl bg-red-950/30 border border-red-900 rounded-md px-3 py-2">
+          {error}
+        </p>
+      )}
 
       {seconds !== null && !error && mode !== "history" && (
         <p className="mt-4 text-neutral-500 text-sm">Done in {seconds}s</p>
       )}
 
       {imageSrc && mode !== "history" && (
-        <img
-          src={imageSrc}
-          alt="Result"
-          className="mt-6 rounded-lg border border-neutral-800 max-w-xl w-full"
-        />
+        <>
+          <img
+            src={imageSrc}
+            alt="Result"
+            className="mt-6 rounded-lg border border-neutral-800 max-w-xl w-full"
+          />
+          <div className="flex gap-4 mt-3">
+            <button
+              onClick={handleDownload}
+              className="text-neutral-400 hover:text-neutral-200 text-sm underline"
+            >
+              Download
+            </button>
+            <button
+              onClick={handleUpscale}
+              disabled={loading}
+              className="text-neutral-400 hover:text-neutral-200 text-sm underline disabled:opacity-50"
+            >
+              Upscale 2x
+            </button>
+          </div>
+        </>
       )}
     </main>
   );
