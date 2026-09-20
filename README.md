@@ -163,4 +163,4 @@ MIT — see [`LICENSE`](LICENSE).
 Step into your own private darkroom and turn any idea into a picture — no cloud, no limits, just you and your imagination!
 _Prompt it. Paint it. Keep it all on your machine._ 🎞️✨
 
-![yoo buddy]https://media.tenor.com/sjV9-bvcOaoAAAAM/yes-hell-yes.gif
+![yoo buddy](https://media.tenor.com/sjV9-bvcOaoAAAAM/yes-hell-yes.gif)
