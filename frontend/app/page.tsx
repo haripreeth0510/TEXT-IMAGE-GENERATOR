@@ -1,39 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Fraunces, IBM_Plex_Mono } from "next/font/google";
+import { Manrope, IBM_Plex_Mono } from "next/font/google";
 
-const display = Fraunces({
+const display = Manrope({
   subsets: ["latin"],
-  weight: ["500", "600"],
-  style: ["normal", "italic"],
+  weight: ["500", "700", "800"],
   variable: "--font-display",
 });
 const mono = IBM_Plex_Mono({
   subsets: ["latin"],
-  weight: ["400", "500", "600"],
+  weight: ["400", "500"],
   variable: "--font-mono",
 });
 
 const API_URL = "http://localhost:8000";
-
-// ---------------------------------------------------------------------
-// Palette (kept as constants rather than a Tailwind config change, so
-// this file stays a drop-in single-file replacement)
-// ---------------------------------------------------------------------
-const c = {
-  bg: "#14100D",
-  panel: "#1C1712",
-  panelAlt: "#211B15",
-  border: "#2A231C",
-  borderLit: "#4A3B2C",
-  accent: "#D62828",
-  accentHover: "#B01F1F",
-  accentDim: "#7A2020",
-  cream: "#F2E9DC",
-  muted: "#9C8F7E",
-  mutedDim: "#6B6153",
-};
 
 type Mode = "generate" | "inpaint" | "history";
 
@@ -52,6 +33,62 @@ async function urlToFile(url: string, filename: string): Promise<File> {
   return new File([blob], filename, { type: blob.type || "image/png" });
 }
 
+// ---------------------------------------------------------------------
+// Shared bits
+// ---------------------------------------------------------------------
+
+function GlowBackdrop() {
+  return (
+    <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden bg-black">
+      <div className="absolute inset-0 opacity-[0.05] [background-image:radial-gradient(circle,#fff_1px,transparent_1px)] [background-size:22px_22px]" />
+      <div
+        className="absolute -bottom-40 -left-40 w-[560px] h-[560px] rounded-full opacity-70 blur-[110px]"
+        style={{
+          background:
+            "radial-gradient(circle, #7C3AED 0%, #4C1D95 45%, transparent 70%)",
+        }}
+      />
+      <div
+        className="absolute -bottom-32 right-[-10%] w-[620px] h-[620px] rounded-full opacity-60 blur-[120px]"
+        style={{
+          background:
+            "radial-gradient(circle, #22D3EE 0%, #1D4ED8 50%, transparent 70%)",
+        }}
+      />
+      <div
+        className="absolute top-[-20%] left-[30%] w-[420px] h-[420px] rounded-full opacity-30 blur-[130px]"
+        style={{
+          background:
+            "radial-gradient(circle, #A78BFA 0%, transparent 70%)",
+        }}
+      />
+    </div>
+  );
+}
+
+function Pill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+        active
+          ? "bg-white text-black"
+          : "text-white/60 hover:text-white/90 border border-white/15"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("generate");
 
@@ -60,14 +97,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [seconds, setSeconds] = useState<number | null>(null);
 
-  // The current "working" image for the conversation — whatever the
-  // last successful generate/inpaint produced. Retouch can continue
-  // from this instead of requiring a fresh upload, which is what makes
-  // edits feel conversational.
   const [currentImage, setCurrentImage] = useState<string | null>(null);
-  // Stack of previous currentImage values, most recent last — Undo
-  // pops from here. This only affects what's shown/continued from on
-  // screen; nothing is deleted from Prints or storage/.
   const [undoStack, setUndoStack] = useState<string[]>([]);
 
   const [prompt, setPrompt] = useState("");
@@ -100,8 +130,6 @@ export default function Home() {
     setSeconds(null);
   }
 
-  // Call this after any successful generate/inpaint — advances
-  // the working image and records what it replaced so Undo can go back.
   function advanceSession(newImageUrl: string) {
     setUndoStack((stack) =>
       currentImage ? [...stack, currentImage] : stack
@@ -174,7 +202,7 @@ export default function Home() {
     }
   }
 
-  // ---------- Download / Upscale (shared result actions) ----------
+  // ---------- Download / Upscale ----------
   async function handleDownload() {
     if (!imageSrc) return;
     const res = await fetch(imageSrc);
@@ -236,9 +264,6 @@ export default function Home() {
     setHasMaskStrokes(false);
     const file = await urlToFile(currentImage, "current.png");
     setInpaintFile(file);
-    // Route through FileReader (data: URL) rather than using the
-    // backend URL directly — a cross-origin <img> drawn onto canvas
-    // taints it and breaks maskCanvas.toBlob() later.
     const reader = new FileReader();
     reader.onload = () => setInpaintPreview(reader.result as string);
     reader.readAsDataURL(file);
@@ -249,7 +274,7 @@ export default function Home() {
     const img = new window.Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
-      const maxW = 640;
+      const maxW = 560;
       const scale = Math.min(maxW / img.width, 1);
       const w = Math.round(img.width * scale);
       const h = Math.round(img.height * scale);
@@ -328,7 +353,7 @@ export default function Home() {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const px = imageData.data;
     for (let i = 0; i < px.length; i += 4) {
-      const inverted = 255 - px[i]; // mask is grayscale strokes on black
+      const inverted = 255 - px[i];
       px[i] = inverted;
       px[i + 1] = inverted;
       px[i + 2] = inverted;
@@ -377,7 +402,7 @@ export default function Home() {
     }
   }
 
-  // ---------- Prints (history) ----------
+  // ---------- History ----------
   async function loadHistory() {
     setHistoryLoading(true);
     try {
@@ -394,31 +419,29 @@ export default function Home() {
 
   async function deleteHistoryItem(id: string) {
     const previous = history;
-    setHistory((h) => h.filter((item) => item.id !== id)); // optimistic
+    setHistory((h) => h.filter((item) => item.id !== id));
     try {
       const res = await fetch(`${API_URL}/history/${id}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error("Could not delete that print.");
     } catch (err) {
-      setHistory(previous); // revert on failure
+      setHistory(previous);
       setError(err instanceof Error ? err.message : "Something went wrong");
     }
   }
 
   async function deleteAllHistory() {
-    if (
-      !window.confirm("Clear your whole print box? This can't be undone.")
-    ) {
+    if (!window.confirm("Clear your whole print box? This can't be undone.")) {
       return;
     }
     const previous = history;
-    setHistory([]); // optimistic
+    setHistory([]);
     try {
       const res = await fetch(`${API_URL}/history`, { method: "DELETE" });
       if (!res.ok) throw new Error("Could not clear your prints.");
     } catch (err) {
-      setHistory(previous); // revert on failure
+      setHistory(previous);
       setError(err instanceof Error ? err.message : "Something went wrong");
     }
   }
@@ -429,184 +452,113 @@ export default function Home() {
     if (next === "history") loadHistory();
   }
 
-  const rail: { key: Mode; label: string; hint: string }[] = [
-    { key: "generate", label: "Develop", hint: "prompt to picture" },
-    { key: "inpaint", label: "Retouch", hint: "paint a change" },
-    { key: "history", label: "Prints", hint: "everything you've made" },
-  ];
+  const headline: Record<Mode, { title: string; sub: string }> = {
+    generate: {
+      title: "Make pictures\nat the speed of thought",
+      sub: "Describe anything. It's generated entirely on this machine.",
+    },
+    inpaint: {
+      title: "Retouch\nwithout the guesswork",
+      sub: "Paint the part that should change — everything else stays untouched.",
+    },
+    history: {
+      title: "Everything\nyou've made",
+      sub: "Every print, kept locally, yours to revisit or clear.",
+    },
+  };
 
   return (
     <main
-      className={`min-h-screen flex flex-col md:flex-row ${display.variable} ${mono.variable}`}
-      style={{ backgroundColor: c.bg, color: c.cream, ...monoStyle }}
+      className={`min-h-screen text-white ${display.variable} ${mono.variable}`}
+      style={{ fontFamily: "var(--font-display)" }}
     >
-      {/* ---------------- Rail ---------------- */}
-      <aside
-        className="w-full md:w-64 md:min-h-screen border-b md:border-b-0 md:border-r px-6 py-6 md:py-10 flex flex-col gap-8 md:gap-12"
-        style={{ borderColor: c.border }}
-      >
-        <div className="flex items-center gap-2.5">
-          <span
-            className="inline-block w-2 h-2 rounded-full"
-            style={{
-              backgroundColor: c.accent,
-              boxShadow: `0 0 10px 2px ${c.accent}66`,
-            }}
-          />
-          <h1
-            className="text-2xl leading-none"
-            style={{ ...displayStyle, fontWeight: 600 }}
-          >
+      <GlowBackdrop />
+
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-6 md:px-10 py-6">
+        <div className="flex items-center gap-2">
+          <span className="text-lg font-extrabold tracking-tight">
             PicDrop
-          </h1>
+          </span>
+          <span
+            className="text-[10px] px-2 py-0.5 rounded-full border border-white/20 text-white/60"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            local
+          </span>
         </div>
-
-        <p className="text-xs leading-relaxed" style={{ color: c.muted }}>
-          A private darkroom for generated pictures. Every image is made and
-          kept on this machine.
-        </p>
-
-        <nav className="flex flex-row md:flex-col gap-1 -mx-2">
-          {rail.map((r) => {
-            const active = mode === r.key;
-            return (
-              <button
-                key={r.key}
-                onClick={() => switchMode(r.key)}
-                className="text-left px-3 py-2.5 border-l-2 md:border-l-2 transition-colors"
-                style={{
-                  borderColor: active ? c.accent : "transparent",
-                  backgroundColor: active ? c.panel : "transparent",
-                }}
-              >
-                <span
-                  className="block text-sm"
-                  style={{ color: active ? c.cream : c.muted }}
-                >
-                  {r.label}
-                </span>
-                <span
-                  className="hidden md:block text-[11px] mt-0.5"
-                  style={{ color: c.mutedDim }}
-                >
-                  {r.hint}
-                </span>
-              </button>
-            );
-          })}
+        <nav className="flex items-center gap-2">
+          <Pill active={mode === "generate"} onClick={() => switchMode("generate")}>
+            Develop
+          </Pill>
+          <Pill active={mode === "inpaint"} onClick={() => switchMode("inpaint")}>
+            Retouch
+          </Pill>
+          <Pill active={mode === "history"} onClick={() => switchMode("history")}>
+            Prints
+          </Pill>
         </nav>
-      </aside>
+      </div>
 
-      {/* ---------------- Workbench ---------------- */}
-      <section className="flex-1 px-6 py-10 md:px-14 md:py-14 flex flex-col items-start gap-6 max-w-3xl">
+      {/* Hero */}
+      <div className="flex flex-col items-center text-center px-6 pt-10 md:pt-16 pb-10">
+        <h1 className="text-[2.6rem] leading-[1.05] sm:text-6xl md:text-7xl font-extrabold tracking-tight whitespace-pre-line max-w-3xl">
+          {headline[mode].title}
+        </h1>
+        <p className="mt-5 text-base md:text-lg text-white/60 max-w-xl">
+          {headline[mode].sub}
+        </p>
+      </div>
+
+      {/* Console */}
+      <div className="px-6 pb-24 flex flex-col items-center gap-6">
         {/* Current print / undo strip */}
         {currentImage && mode !== "history" && (
-          <div
-            className="w-full max-w-xl flex items-center gap-3 px-3 py-2 border"
-            style={{ backgroundColor: c.panel, borderColor: c.border }}
-          >
+          <div className="w-full max-w-2xl flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white/5 border border-white/10 backdrop-blur">
             <img
               src={currentImage}
               alt="Current print"
-              className="w-9 h-9 object-cover"
-              style={{ border: `1px solid ${c.border}` }}
+              className="w-8 h-8 rounded-lg object-cover"
             />
-            <span className="text-[11px] flex-1" style={{ color: c.mutedDim }}>
+            <span className="text-xs text-white/50 flex-1">
               Current print — Retouch can continue from this
             </span>
             <button
               onClick={handleUndo}
               disabled={undoStack.length === 0}
-              className="text-xs whitespace-nowrap disabled:opacity-30"
-              style={{ color: undoStack.length ? c.accent : c.mutedDim }}
+              className="text-xs font-medium disabled:opacity-30 text-white/80 hover:text-white"
             >
               Undo
             </button>
           </div>
         )}
 
-        {/* ---------------- Develop ---------------- */}
+        {/* ---------------- Develop console ---------------- */}
         {mode === "generate" && (
-          <div className="w-full max-w-xl flex flex-col gap-4">
-            <div>
-              <h2
-                className="text-xl mb-1"
-                style={{ ...displayStyle, fontWeight: 600 }}
-              >
-                Develop
-              </h2>
-              <p className="text-xs" style={{ color: c.mutedDim }}>
-                Describe a picture. It's exposed and developed locally.
-              </p>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                className="flex-1 px-3 py-2.5 text-sm outline-none border"
-                style={inputStyle}
-                placeholder="A lighthouse at dusk, storm rolling in..."
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
-              />
-              <select
-                value={resolution}
-                onChange={(e) => setResolution(parseInt(e.target.value))}
-                className="px-2 text-sm outline-none border"
-                style={inputStyle}
-              >
-                <option value={512}>512px</option>
-                <option value={768}>768px</option>
-                <option value={1024}>1024px</option>
-              </select>
-              <button
-                onClick={handleGenerate}
-                disabled={
-                  loading ||
-                  !prompt.trim() ||
-                  (useReference && !referenceFile)
-                }
-                className="px-5 py-2.5 text-sm whitespace-nowrap disabled:opacity-40 transition-colors"
-                style={primaryButtonStyle}
-              >
-                {loading ? "Developing…" : "Develop image"}
-              </button>
-            </div>
-
-            <label className="flex items-center gap-2 cursor-pointer text-sm select-none">
-              <input
-                type="checkbox"
-                checked={useReference}
-                onChange={(e) => {
-                  setUseReference(e.target.checked);
-                  if (!e.target.checked) {
-                    setReferenceFile(null);
-                    setReferencePreview(null);
-                  }
-                }}
-                style={{ accentColor: c.accent }}
-              />
-              <span style={{ color: c.muted }}>
-                Guide it with a reference image
-              </span>
-            </label>
+          <div className="w-full max-w-2xl rounded-[2rem] bg-white/[0.06] border border-white/10 backdrop-blur-xl p-2 shadow-[0_0_80px_-20px_rgba(124,58,237,0.5)]">
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="A lighthouse at dusk, storm rolling in..."
+              rows={3}
+              className="w-full bg-transparent outline-none resize-none px-4 pt-4 pb-2 text-lg placeholder-white/35"
+            />
 
             {useReference && (
-              <div className="flex flex-col gap-3">
+              <div className="px-4 pb-2 flex flex-col gap-3">
                 <div
                   onClick={() => referenceInputRef.current?.click()}
-                  className="cursor-pointer border border-dashed flex flex-col items-center justify-center py-6 px-4 text-center transition-colors"
-                  style={{ borderColor: c.border }}
+                  className="cursor-pointer border border-dashed border-white/15 rounded-xl flex flex-col items-center justify-center py-5 px-4 text-center"
                 >
                   {referencePreview ? (
                     <img
                       src={referencePreview}
                       alt="Reference preview"
-                      className="max-h-40"
+                      className="max-h-32 rounded-lg"
                     />
                   ) : (
-                    <p className="text-sm" style={{ color: c.muted }}>
-                      Click to upload a reference image
+                    <p className="text-sm text-white/50">
+                      Upload a reference image
                     </p>
                   )}
                   <input
@@ -617,10 +569,7 @@ export default function Home() {
                     className="hidden"
                   />
                 </div>
-                <div
-                  className="flex items-center gap-3 text-xs"
-                  style={{ color: c.mutedDim }}
-                >
+                <div className="flex items-center gap-3 text-xs text-white/50">
                   <span>loose</span>
                   <input
                     type="range"
@@ -631,50 +580,75 @@ export default function Home() {
                     onChange={(e) =>
                       setReferenceStrength(parseFloat(e.target.value))
                     }
-                    className="flex-1"
-                    style={{ accentColor: c.accent }}
+                    className="flex-1 accent-violet-400"
                   />
                   <span>strict</span>
-                  <span className="w-10 text-right" style={{ color: c.muted }}>
+                  <span className="w-9 text-right text-white/70">
                     {referenceStrength.toFixed(2)}
                   </span>
                 </div>
-                <p className="text-[11px]" style={{ color: c.mutedDim }}>
-                  Higher strength copies the reference's style/content more
-                  aggressively; lower lets the prompt lead.
-                </p>
               </div>
             )}
+
+            <div className="flex items-center justify-between px-3 pb-2 pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setUseReference(!useReference);
+                    if (useReference) {
+                      setReferenceFile(null);
+                      setReferencePreview(null);
+                    }
+                  }}
+                  className={`w-9 h-9 rounded-full flex items-center justify-center text-lg border transition-colors ${
+                    useReference
+                      ? "bg-white text-black border-white"
+                      : "border-white/15 text-white/60 hover:text-white"
+                  }`}
+                  title="Guide with a reference image"
+                >
+                  +
+                </button>
+                <select
+                  value={resolution}
+                  onChange={(e) => setResolution(parseInt(e.target.value))}
+                  className="bg-white/10 border border-white/10 rounded-full px-3 py-1.5 text-xs outline-none"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  <option value={512}>512px</option>
+                  <option value={768}>768px</option>
+                  <option value={1024}>1024px</option>
+                </select>
+              </div>
+
+              <button
+                onClick={handleGenerate}
+                disabled={
+                  loading || !prompt.trim() || (useReference && !referenceFile)
+                }
+                className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center disabled:opacity-30 transition-transform active:scale-95"
+                title={loading ? "Developing…" : "Develop image"}
+              >
+                {loading ? (
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-black/30 border-t-black animate-spin" />
+                ) : (
+                  "↑"
+                )}
+              </button>
+            </div>
           </div>
         )}
 
-        {/* ---------------- Retouch ---------------- */}
+        {/* ---------------- Retouch console ---------------- */}
         {mode === "inpaint" && (
-          <div className="w-full max-w-xl flex flex-col gap-4">
-            <div>
-              <h2
-                className="text-xl mb-1"
-                style={{ ...displayStyle, fontWeight: 600 }}
-              >
-                Retouch
-              </h2>
-              <p className="text-xs leading-relaxed" style={{ color: c.mutedDim }}>
-                Paint over what should change. For a new background: paint
-                around the subject, press Invert, then describe the
-                background — the subject stays untouched.
-              </p>
-            </div>
-
+          <div className="w-full max-w-2xl rounded-[2rem] bg-white/[0.06] border border-white/10 backdrop-blur-xl p-5 shadow-[0_0_80px_-20px_rgba(34,211,238,0.45)] flex flex-col gap-4">
             {!inpaintPreview && (
               <>
                 <div
                   onClick={() => inpaintFileInputRef.current?.click()}
-                  className="cursor-pointer border border-dashed flex flex-col items-center justify-center py-10 px-4 text-center transition-colors"
-                  style={{ borderColor: c.border }}
+                  className="cursor-pointer border border-dashed border-white/15 rounded-2xl flex flex-col items-center justify-center py-14 px-4 text-center"
                 >
-                  <p className="text-sm" style={{ color: c.muted }}>
-                    Click to bring in a photo
-                  </p>
+                  <p className="text-white/60">Click to bring in a photo</p>
                 </div>
                 <input
                   ref={inpaintFileInputRef}
@@ -686,8 +660,7 @@ export default function Home() {
                 {currentImage && (
                   <button
                     onClick={useCurrentForInpaint}
-                    className="text-sm self-start"
-                    style={{ color: c.accent }}
+                    className="text-sm text-white/70 hover:text-white self-start"
                   >
                     Continue from the current print instead
                   </button>
@@ -698,17 +671,10 @@ export default function Home() {
             {inpaintPreview && (
               <>
                 <div
-                  className="relative mx-auto"
-                  style={{
-                    width: canvasDims.w || undefined,
-                    border: `1px solid ${c.border}`,
-                    boxShadow: `0 0 50px -18px ${c.accent}55`,
-                  }}
+                  className="relative mx-auto rounded-xl overflow-hidden border border-white/10"
+                  style={{ width: canvasDims.w || undefined }}
                 >
-                  <canvas
-                    ref={imageCanvasRef}
-                    className="absolute top-0 left-0"
-                  />
+                  <canvas ref={imageCanvasRef} className="absolute top-0 left-0" />
                   <canvas
                     ref={maskCanvasRef}
                     className="relative cursor-crosshair opacity-50"
@@ -720,8 +686,8 @@ export default function Home() {
                 </div>
 
                 <div
-                  className="flex items-center gap-3 text-xs flex-wrap"
-                  style={{ color: c.mutedDim }}
+                  className="flex items-center gap-3 text-xs text-white/50 flex-wrap"
+                  style={{ fontFamily: "var(--font-mono)" }}
                 >
                   <span>brush</span>
                   <input
@@ -731,20 +697,15 @@ export default function Home() {
                     step={5}
                     value={brushSize}
                     onChange={(e) => setBrushSize(parseInt(e.target.value))}
-                    className="flex-1 min-w-[80px]"
-                    style={{ accentColor: c.accent }}
+                    className="flex-1 min-w-[80px] accent-cyan-300"
                   />
-                  <span className="w-10 text-right" style={{ color: c.muted }}>
+                  <span className="w-10 text-right text-white/70">
                     {brushSize}px
                   </span>
-                  <button onClick={clearMask} style={{ color: c.muted }}>
+                  <button onClick={clearMask} className="hover:text-white">
                     clear
                   </button>
-                  <button
-                    onClick={invertMask}
-                    title="Paint around the subject, then invert to edit the background instead"
-                    style={{ color: c.muted }}
-                  >
+                  <button onClick={invertMask} className="hover:text-white">
                     invert
                   </button>
                   <button
@@ -753,16 +714,15 @@ export default function Home() {
                       setInpaintPreview(null);
                       setHasMaskStrokes(false);
                     }}
-                    style={{ color: c.muted }}
+                    className="hover:text-white"
                   >
                     change photo
                   </button>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-2">
+                <div className="flex items-center gap-2 rounded-full bg-white/5 border border-white/10 pl-4 pr-1.5 py-1.5">
                   <input
-                    className="flex-1 px-3 py-2.5 text-sm outline-none border"
-                    style={inputStyle}
+                    className="flex-1 bg-transparent outline-none text-sm placeholder-white/35"
                     placeholder="What should appear here..."
                     value={inpaintPrompt}
                     onChange={(e) => setInpaintPrompt(e.target.value)}
@@ -770,13 +730,14 @@ export default function Home() {
                   />
                   <button
                     onClick={handleInpaint}
-                    disabled={
-                      loading || !inpaintPrompt.trim() || !hasMaskStrokes
-                    }
-                    className="px-5 py-2.5 text-sm whitespace-nowrap disabled:opacity-40"
-                    style={primaryButtonStyle}
+                    disabled={loading || !inpaintPrompt.trim() || !hasMaskStrokes}
+                    className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center disabled:opacity-30"
                   >
-                    {loading ? "Retouching…" : "Apply"}
+                    {loading ? (
+                      <span className="w-3.5 h-3.5 rounded-full border-2 border-black/30 border-t-black animate-spin" />
+                    ) : (
+                      "↑"
+                    )}
                   </button>
                 </div>
               </>
@@ -786,85 +747,54 @@ export default function Home() {
 
         {/* ---------------- Prints (history) ---------------- */}
         {mode === "history" && (
-          <div className="w-full max-w-2xl">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h2
-                  className="text-xl mb-1"
-                  style={{ ...displayStyle, fontWeight: 600 }}
-                >
-                  Prints
-                </h2>
-                <p className="text-xs" style={{ color: c.mutedDim }}>
-                  Everything you've developed, newest first.
-                </p>
-              </div>
-              {history.length > 0 && (
+          <div className="w-full max-w-4xl">
+            {history.length > 0 && (
+              <div className="flex justify-end mb-4">
                 <button
                   onClick={deleteAllHistory}
-                  className="text-xs whitespace-nowrap"
-                  style={{ color: c.mutedDim }}
-                  onMouseEnter={(e) =>
-                    (e.currentTarget.style.color = c.accent)
-                  }
-                  onMouseLeave={(e) =>
-                    (e.currentTarget.style.color = c.mutedDim)
-                  }
+                  className="text-xs text-white/40 hover:text-red-400"
                 >
                   clear all
                 </button>
-              )}
-            </div>
+              </div>
+            )}
 
             {historyLoading && (
-              <p className="text-sm" style={{ color: c.mutedDim }}>
+              <p className="text-sm text-white/50 text-center">
                 Loading your prints…
               </p>
             )}
             {!historyLoading && history.length === 0 && (
-              <p className="text-sm" style={{ color: c.mutedDim }}>
+              <p className="text-sm text-white/50 text-center">
                 Nothing developed yet.
               </p>
             )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {history.map((item, i) => (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {history.map((item) => (
                 <div
                   key={item.id}
-                  className="relative group border"
-                  style={{ borderColor: c.border, backgroundColor: c.panel }}
+                  className="relative group rounded-2xl overflow-hidden bg-white/5 border border-white/10"
                 >
-                  <div
-                    className="flex items-center justify-between px-2 py-1 text-[10px]"
-                    style={{ color: c.mutedDim, borderBottom: `1px solid ${c.border}` }}
+                  <button
+                    onClick={() => deleteHistoryItem(item.id)}
+                    className="absolute top-2 right-2 z-10 w-6 h-6 rounded-full bg-black/60 text-white/80 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs"
                   >
-                    <span>
-                      No.&nbsp;{String(history.length - i).padStart(3, "0")}
-                    </span>
-                    <button
-                      onClick={() => deleteHistoryItem(item.id)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity"
-                      style={{ color: c.accent }}
-                    >
-                      remove
-                    </button>
-                  </div>
+                    ×
+                  </button>
                   <img
                     src={`${API_URL}${item.image_url}`}
                     alt={item.prompt}
                     className="w-full aspect-square object-cover"
                   />
-                  <div className="p-2">
+                  <div className="p-2.5">
                     <p
-                      className="text-[10px] mb-0.5"
-                      style={{ color: c.mutedDim }}
+                      className="text-[10px] uppercase tracking-wide text-white/35 mb-0.5"
+                      style={{ fontFamily: "var(--font-mono)" }}
                     >
                       {item.mode}
                     </p>
-                    <p
-                      className="text-xs line-clamp-2"
-                      style={{ color: c.muted }}
-                    >
+                    <p className="text-xs text-white/70 line-clamp-2">
                       {item.prompt}
                     </p>
                   </div>
@@ -876,73 +806,45 @@ export default function Home() {
 
         {/* ---------------- Shared result / error ---------------- */}
         {error && (
-          <p
-            className="text-sm max-w-xl px-3 py-2 border"
-            style={{
-              color: "#F2A08A",
-              backgroundColor: "#2A1210",
-              borderColor: c.accentDim,
-            }}
-          >
+          <p className="text-sm max-w-xl px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/25 text-red-300">
             {error}
           </p>
         )}
 
         {seconds !== null && !error && mode !== "history" && (
-          <p className="text-xs" style={{ color: c.mutedDim }}>
+          <p
+            className="text-xs text-white/40"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
             done in {seconds}s
           </p>
         )}
 
         {imageSrc && mode !== "history" && (
-          <>
+          <div className="w-full max-w-xl flex flex-col items-center gap-3">
             <img
               src={imageSrc}
               alt="Result"
-              className="max-w-xl w-full"
-              style={{
-                border: `1px solid ${c.border}`,
-                boxShadow: `0 0 60px -18px ${c.accent}55`,
-              }}
+              className="w-full rounded-2xl border border-white/10 shadow-[0_0_60px_-20px_rgba(124,58,237,0.6)]"
             />
-            <div className="flex gap-4 -mt-2">
+            <div className="flex gap-5">
               <button
                 onClick={handleDownload}
-                className="text-xs"
-                style={{ color: c.muted }}
+                className="text-xs text-white/50 hover:text-white"
               >
                 download
               </button>
               <button
                 onClick={handleUpscale}
                 disabled={loading}
-                className="text-xs disabled:opacity-40"
-                style={{ color: c.muted }}
+                className="text-xs text-white/50 hover:text-white disabled:opacity-40"
               >
                 upscale 2×
               </button>
             </div>
-          </>
+          </div>
         )}
-      </section>
+      </div>
     </main>
   );
 }
-
-// ---------------------------------------------------------------------
-// Shared inline style objects (kept outside the component body so they
-// aren't recreated every render)
-// ---------------------------------------------------------------------
-const monoStyle = { fontFamily: "var(--font-mono)" } as const;
-const displayStyle = { fontFamily: "var(--font-display)" } as const;
-
-const inputStyle = {
-  backgroundColor: "#1C1712",
-  borderColor: "#2A231C",
-  color: "#F2E9DC",
-};
-
-const primaryButtonStyle = {
-  backgroundColor: "#D62828",
-  color: "#F2E9DC",
-};
